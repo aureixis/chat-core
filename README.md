@@ -44,7 +44,7 @@ Backend variables:
 ```text
 DATABASE_URL=${{Postgres.DATABASE_URL}}
 JWT_SECRET=<long-random-secret>
-CORS_ORIGINS=https://<your-frontend-domain>
+CORS_ORIGINS=https://lamya.aureixis.com
 ADMIN_EMAIL=<admin-email>
 ADMIN_PASSWORD=<strong-admin-password>
 TRANSLATION_PROVIDER=openai_compatible

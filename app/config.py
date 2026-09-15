@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://chat:chat@localhost:5432/chat"
     jwt_secret: str = "change-me"
     access_token_minutes: int = 1440
-    cors_origins: str = "http://localhost:5173"
+    cors_origins: str = "http://localhost:5173,https://lamya.aureixis.com"
     admin_email: str = "admin@example.com"
     admin_password: str = "change-me-now"
     translation_provider: str = "local"
@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     @property
     def allowed_origins(self) -> list[str]:
-        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+        return [origin.strip().rstrip("/") for origin in self.cors_origins.split(",") if origin.strip()]
 
     @property
     def sqlalchemy_database_url(self) -> str:

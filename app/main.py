@@ -132,8 +132,9 @@ def users(q: str = Query(default="", max_length=120), user: User = Depends(curre
 
 
 @app.get("/api/admin/users", response_model=list[UserResponse])
-def admin_users(_: User = Depends(admin_user), database: Session = Depends(get_db)):
-    return list(database.scalars(select(User).where(User.is_admin.is_(False)).order_by(User.name)))
+def admin_users(admin: User = Depends(admin_user), database: Session = Depends(get_db)):
+    clear_expired_guests(database)
+    return list(database.scalars(select(User).where(User.id != admin.id).order_by(User.name)))
 
 
 @app.get("/api/connections", response_model=list[ConnectionResponse])
