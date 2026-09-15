@@ -21,6 +21,17 @@ class Settings(BaseSettings):
     def allowed_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
+    @property
+    def sqlalchemy_database_url(self) -> str:
+        if not self.database_url.strip():
+            raise ValueError("DATABASE_URL is empty. Add a Railway reference to the PostgreSQL DATABASE_URL variable.")
+        url = self.database_url.strip()
+        if url.startswith("postgres://"):
+            return "postgresql+psycopg://" + url.removeprefix("postgres://")
+        if url.startswith("postgresql://"):
+            return "postgresql+psycopg://" + url.removeprefix("postgresql://")
+        return url
+
 
 @lru_cache
 def get_settings() -> Settings:
