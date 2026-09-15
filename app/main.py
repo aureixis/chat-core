@@ -28,6 +28,7 @@ async def lifespan(_: FastAPI):
             connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS sex VARCHAR(30)"))
             connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_guest BOOLEAN NOT NULL DEFAULT FALSE"))
             connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS guest_expires_at TIMESTAMPTZ"))
+            connection.execute(text("UPDATE users SET email = regexp_replace(email, '@guest\\.lamya\\.local$', '@guest.lamya.app') WHERE email LIKE '%@guest.lamya.local'"))
             connection.execute(text("ALTER TABLE translation_settings ADD COLUMN IF NOT EXISTS system_prompt TEXT"))
     database = SessionLocal()
     try:
@@ -112,7 +113,7 @@ def guest_login(payload: GuestLogin, database: Session = Depends(get_db)):
     nickname = payload.nickname.strip()
     if database.scalar(select(User).where(User.is_guest.is_(True), User.name.ilike(nickname))):
         raise HTTPException(status_code=409, detail="That guest nickname is already in use")
-    guest_email = f"guest-{uuid4().hex}@guest.lamya.local"
+    guest_email = f"guest-{uuid4().hex}@guest.lamya.app"
     user = User(email=guest_email, name=nickname, sex=payload.sex, is_guest=True, guest_expires_at=datetime.now(timezone.utc) + timedelta(hours=24), password_hash=hash_password(uuid4().hex), preferred_language=payload.preferred_language)
     database.add(user)
     database.commit()
