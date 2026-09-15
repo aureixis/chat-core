@@ -8,6 +8,7 @@ class UserCreate(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     bio: str | None = Field(default=None, max_length=500)
     profile_picture_url: str | None = Field(default=None, max_length=1000)
+    sex: str = Field(default="prefer_not_to_say", pattern="^(female|male|non_binary|prefer_not_to_say)$")
     password: str = Field(min_length=8, max_length=128)
     preferred_language: str = Field(default="en", min_length=2, max_length=20)
 
@@ -15,6 +16,12 @@ class UserCreate(BaseModel):
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str
+
+
+class GuestLogin(BaseModel):
+    nickname: str = Field(min_length=2, max_length=60)
+    sex: str = Field(pattern="^(female|male|non_binary|prefer_not_to_say)$")
+    preferred_language: str = Field(min_length=2, max_length=20)
 
 
 class UserResponse(BaseModel):
@@ -25,6 +32,7 @@ class UserResponse(BaseModel):
     name: str
     bio: str | None = None
     profile_picture_url: str | None = None
+    sex: str | None = None
     preferred_language: str
     is_admin: bool = False
 

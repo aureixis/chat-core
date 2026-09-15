@@ -14,10 +14,20 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(120))
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
     profile_picture_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    sex: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    is_guest: Mapped[bool] = mapped_column(Boolean, default=False)
+    guest_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     preferred_language: Mapped[str] = mapped_column(String(20), default="en")
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    sent_connections: Mapped[list["Connection"]] = relationship(
+        foreign_keys="Connection.requester_id", back_populates="requester"
+    )
+    received_connections: Mapped[list["Connection"]] = relationship(
+        foreign_keys="Connection.recipient_id", back_populates="recipient"
+    )
 
 
 class Connection(Base):
@@ -29,6 +39,9 @@ class Connection(Base):
     recipient_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     status: Mapped[str] = mapped_column(String(20), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    requester: Mapped[User] = relationship(foreign_keys=[requester_id], back_populates="sent_connections")
+    recipient: Mapped[User] = relationship(foreign_keys=[recipient_id], back_populates="received_connections")
 
 
 class Conversation(Base):
