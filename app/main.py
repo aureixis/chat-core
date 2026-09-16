@@ -13,7 +13,7 @@ from .database import Base, SessionLocal, engine, get_db
 from .models import Connection, Conversation, Message, TranslationSettings, User
 from .schemas import (AuthResponse, ConnectionCreate, ConnectionResponse, ConversationResponse, GuestLogin,
                       LoginRequest, MessageResponse, TranslationSettingsResponse, TranslationSettingsUpdate,
-                      UserCreate, UserResponse)
+                      UserCreate, UserResponse, message_response_for)
 from .security import admin_user, create_access_token, current_user, get_user_from_token, hash_password, verify_password
 from .translation import DEFAULT_SYSTEM_PROMPT, TranslationService
 
@@ -189,7 +189,8 @@ def messages(conversation_id: int, user: User = Depends(current_user), database:
     conversation = database.get(Conversation, conversation_id)
     if not conversation or user.id not in (conversation.user_a_id, conversation.user_b_id):
         raise HTTPException(status_code=404, detail="Conversation not found")
-    return list(database.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at)))
+    rows = list(database.scalars(select(Message).where(Message.conversation_id == conversation_id).order_by(Message.created_at)))
+    return [message_response_for(message, user.id) for message in rows]
 
 
 @app.get("/api/admin/translation", response_model=TranslationSettingsResponse)
@@ -214,18 +215,20 @@ def update_translation(payload: TranslationSettingsUpdate, _: User = Depends(adm
 
 class ConnectionManager:
     def __init__(self):
-        self.connections: dict[int, set[WebSocket]] = {}
+        self.connections: dict[int, dict[WebSocket, int]] = {}
 
-    async def connect(self, conversation_id: int, websocket: WebSocket):
+    async def connect(self, conversation_id: int, websocket: WebSocket, user_id: int):
         await websocket.accept()
-        self.connections.setdefault(conversation_id, set()).add(websocket)
+        self.connections.setdefault(conversation_id, {})[websocket] = user_id
 
     def disconnect(self, conversation_id: int, websocket: WebSocket):
-        self.connections.get(conversation_id, set()).discard(websocket)
+        self.connections.get(conversation_id, {}).pop(websocket, None)
 
-    async def broadcast(self, conversation_id: int, payload: dict):
-        for websocket in list(self.connections.get(conversation_id, set())):
-            await websocket.send_json(payload)
+    async def broadcast(self, conversation_id: int, payloads: dict[int, dict]):
+        for websocket, user_id in list(self.connections.get(conversation_id, {}).items()):
+            payload = payloads.get(user_id)
+            if payload:
+                await websocket.send_json(payload)
 
 
 manager = ConnectionManager()
@@ -260,7 +263,7 @@ async def websocket_chat(websocket: WebSocket, conversation_id: int, token: str,
         if not conversation or user.id not in (conversation.user_a_id, conversation.user_b_id):
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
             return
-        await manager.connect(conversation_id, websocket)
+        await manager.connect(conversation_id, websocket, user.id)
         while True:
             payload = await websocket.receive_json()
             text = str(payload.get("text", "")).strip()
@@ -274,7 +277,10 @@ async def websocket_chat(websocket: WebSocket, conversation_id: int, token: str,
             database.add(message)
             database.commit()
             database.refresh(message)
-            await manager.broadcast(conversation_id, {"type": "message", "message": MessageResponse.model_validate(message).model_dump(mode="json")})
+            await manager.broadcast(conversation_id, {
+                user.id: {"type": "message", "message": message_response_for(message, user.id).model_dump(mode="json")},
+                peer_id: {"type": "message", "message": message_response_for(message, peer_id).model_dump(mode="json")},
+            })
     except WebSocketDisconnect:
         pass
     finally:

@@ -77,6 +77,21 @@ class MessageResponse(BaseModel):
     created_at: datetime
 
 
+def message_response_for(message, viewer_id: int) -> MessageResponse:
+    if message.sender_id == viewer_id:
+        return MessageResponse(
+            id=message.id,
+            conversation_id=message.conversation_id,
+            sender_id=message.sender_id,
+            original_text=message.original_text,
+            source_language=message.source_language,
+            translated_text=message.original_text,
+            target_language=message.source_language,
+            created_at=message.created_at,
+        )
+    return MessageResponse.model_validate(message)
+
+
 class TranslationSettingsResponse(BaseModel):
     provider: str
     api_url: str | None
