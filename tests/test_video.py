@@ -57,7 +57,7 @@ def test_admin_views_cameras_and_shares_screen_without_visitor_discovery(client)
                 controllers = first_ws.receive_json()["participants"]
                 assert [row["id"] for row in controllers] == [admin_id]
                 assert first_ws.receive_json() == {
-                    "type": "signal", "from": admin_id, "signal": offer
+                    "type": "signal", "from": admin_id, "signal": {**offer, "camera_allowed": True}
                 }
                 assert second_ws.receive_json()["participants"] == []
                 admin_ws.receive_json()
@@ -165,8 +165,61 @@ def test_video_password_configuration_and_retry(client, monkeypatch):
                 )
                 assert admin.receive_json()["granted"] is allowed
             visitor.receive_json()
-            assert visitor.receive_json() == {"type": "signal", "from": admin_id, "signal": offer}
+            assert visitor.receive_json() == {
+                "type": "signal", "from": admin_id, "signal": {**offer, "camera_allowed": True}
+            }
             assert room.links == {(admin_id, visitor_id)}
+
+
+def test_screen_sharing_connects_without_password_and_camera_unlock_is_separate(client):
+    _, visitor_protocols = guest(client, "Screen recipient")
+    _, admin_protocols = guest(client, "Screen sender")
+    with client.websocket_connect("/ws/live/room", subprotocols=visitor_protocols) as visitor:
+        visitor_id = visitor.receive_json()["id"]
+        visitor.receive_json()
+        with client.websocket_connect(
+            "/ws/live/room?role=admin", subprotocols=admin_protocols
+        ) as admin:
+            admin_id = admin.receive_json()["id"]
+            admin.receive_json()
+            visitor.receive_json()
+            offer = {
+                "kind": "offer", "purpose": "screen", "camera_allowed": True,
+                "description": {"type": "offer", "sdp": "screen-only"},
+            }
+            admin.send_json({"type": "signal", "target": visitor_id, "signal": offer})
+            # No password challenge is sent for screen sharing.
+            assert admin.receive_json()["type"] == "participants"
+            assert visitor.receive_json()["participants"][0]["id"] == admin_id
+            assert visitor.receive_json()["signal"] == {**offer, "camera_allowed": False}
+            assert room.links == {(admin_id, visitor_id)}
+            for password in (None, "wrong"):
+                admin.send_json(
+                    {"type": "signal", "target": visitor_id,
+                     "signal": {"kind": "camera", "password": password, "enabled": True}}
+                )
+                assert admin.receive_json()["granted"] is False
+                # Failed camera unlocks preserve the screen link and send no camera grant.
+                admin.send_json(
+                    {"type": "signal", "target": visitor_id,
+                     "signal": {"kind": "screen", "enabled": True}}
+                )
+                assert visitor.receive_json()["signal"] == {"kind": "screen", "enabled": True}
+                assert room.links == {(admin_id, visitor_id)}
+            admin.send_json(
+                {"type": "signal", "target": visitor_id,
+                 "signal": {"kind": "camera", "password": "1234"}}
+            )
+            assert admin.receive_json()["granted"] is True
+            assert visitor.receive_json()["signal"] == {"kind": "camera", "enabled": True}
+            # Visitors cannot grant themselves camera access or initiate a screen offer.
+            visitor.send_json(
+                {"type": "signal", "target": admin_id,
+                 "signal": {"kind": "camera", "password": "1234", "enabled": True}}
+            )
+            visitor.send_json({"type": "signal", "target": admin_id, "signal": offer})
+            visitor.send_json({"type": "presence", "camera": True})
+            assert admin.receive_json()["type"] == "participants"
 
 
 def test_expired_guest_can_be_replaced_without_login(client):

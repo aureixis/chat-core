@@ -44,6 +44,22 @@ class VideoRoom:
 room = VideoRoom()
 
 
+async def _authorize_camera(websocket: WebSocket, target_id: str, password: object) -> bool:
+    expected = get_settings().video_admin_password
+    granted = (
+        isinstance(password, str)
+        and bool(expected)
+        and secrets.compare_digest(password.encode("utf-8"), expected.encode("utf-8"))
+    )
+    await websocket.send_json(
+        {
+            "type": "video_access", "target": target_id, "granted": granted,
+            **({} if granted else {"detail": "Incorrect video password"}),
+        }
+    )
+    return granted
+
+
 @router.websocket("/ws/live/room")
 async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "visitor"):
     # The video console uses its own password gate; it does not grant platform
@@ -88,7 +104,7 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
                     or target_id == participant_id
                     or not isinstance(signal, dict)
                     or not isinstance(signal.get("kind"), str)
-                    or signal.get("kind") not in {"connect", "offer", "answer", "ice", "hangup", "screen"}
+                    or signal.get("kind") not in {"connect", "offer", "answer", "ice", "hangup", "screen", "camera"}
                 ):
                     continue
                 target = room.clients.get(target_id)
@@ -100,25 +116,13 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
                 if kind == "offer":
                     if role != "admin":
                         continue
-                    supplied_password = signal.get("password")
-                    expected_password = get_settings().video_admin_password
-                    granted = (
-                        isinstance(supplied_password, str)
-                        and bool(expected_password)
-                        and secrets.compare_digest(
-                            supplied_password.encode("utf-8"), expected_password.encode("utf-8")
+                    camera_allowed = False
+                    if signal.get("purpose") != "screen":
+                        camera_allowed = await _authorize_camera(
+                            websocket, target_id, signal.get("password")
                         )
-                    )
-                    await websocket.send_json(
-                        {
-                            "type": "video_access",
-                            "target": target_id,
-                            "granted": granted,
-                            **({} if granted else {"detail": "Incorrect video password"}),
-                        }
-                    )
-                    if not granted:
-                        continue
+                        if not camera_allowed:
+                            continue
                     room.links.add(link)
                     await room.roster()
                 elif link not in room.links:
@@ -127,6 +131,18 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
                     continue
                 if kind == "screen" and role != "admin":
                     continue
+                if kind == "camera":
+                    if role != "admin" or not await _authorize_camera(
+                        websocket, target_id, signal.get("password")
+                    ):
+                        continue
+                forwarded = {key: value for key, value in signal.items() if key != "password"}
+                if kind == "offer":
+                    # Never trust a client-supplied camera permission. A screen-only
+                    # connection must not transmit the visitor's camera track.
+                    forwarded["camera_allowed"] = camera_allowed
+                elif kind == "camera":
+                    forwarded = {"kind": "camera", "enabled": True}
                 if target:
                     try:
                         # The sender is supplied by the server, never trusted from the client.
@@ -134,7 +150,7 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
                             {
                                 "type": "signal",
                                 "from": participant_id,
-                                "signal": {key: value for key, value in signal.items() if key != "password"},
+                                "signal": forwarded,
                             }
                         )
                     except (RuntimeError, WebSocketDisconnect, OSError):
