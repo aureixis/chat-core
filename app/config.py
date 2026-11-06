@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173,https://lamya.aureixis.com"
     admin_email: str = "admin@example.com"
     admin_password: str = "change-me-now"
+    video_admin_password: str = "1234"
     translation_provider: str = "local"
     translation_api_url: str | None = None
     translation_api_key: str | None = None

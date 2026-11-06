@@ -1,11 +1,13 @@
 """Live, consent-based video discovery and directed WebRTC signalling."""
 
 import json
+import secrets
 from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
 
+from ..config import get_settings
 from ..database import SessionLocal
 from ..security import get_user_from_token
 from .chat import _websocket_credentials
@@ -44,8 +46,8 @@ room = VideoRoom()
 
 @router.websocket("/ws/live/room")
 async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "visitor"):
-    # This is a no-login presentation role, not the account's administrative
-    # privilege. The /admin video console is intentionally available without login.
+    # The video console uses its own password gate; it does not grant platform
+    # administrator privileges or require an account login.
     participant_id = uuid4().hex
     try:
         credential, subprotocol = _websocket_credentials(websocket, None)
@@ -98,6 +100,25 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
                 if kind == "offer":
                     if role != "admin":
                         continue
+                    supplied_password = signal.get("password")
+                    expected_password = get_settings().video_admin_password
+                    granted = (
+                        isinstance(supplied_password, str)
+                        and bool(expected_password)
+                        and secrets.compare_digest(
+                            supplied_password.encode("utf-8"), expected_password.encode("utf-8")
+                        )
+                    )
+                    await websocket.send_json(
+                        {
+                            "type": "video_access",
+                            "target": target_id,
+                            "granted": granted,
+                            **({} if granted else {"detail": "Incorrect video password"}),
+                        }
+                    )
+                    if not granted:
+                        continue
                     room.links.add(link)
                     await room.roster()
                 elif link not in room.links:
@@ -110,7 +131,11 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
                     try:
                         # The sender is supplied by the server, never trusted from the client.
                         await target.send_json(
-                            {"type": "signal", "from": participant_id, "signal": signal}
+                            {
+                                "type": "signal",
+                                "from": participant_id,
+                                "signal": {key: value for key, value in signal.items() if key != "password"},
+                            }
                         )
                     except (RuntimeError, WebSocketDisconnect, OSError):
                         pass
