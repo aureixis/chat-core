@@ -51,6 +51,35 @@ def test_unique_links_persist_and_have_configurable_expiry(client):
     assert validate_token(token(manual))[1] == "active"
 
 
+@pytest.mark.parametrize("state", ["active", "invalid", "expired", "revoked"])
+def test_public_link_check_returns_only_safe_metadata_before_guest_entry(client, state):
+    invitation = create_invitation("Public check", None)
+    if state == "revoked":
+        revoke_invitation(invitation["id"])
+    elif state == "expired":
+        with SessionLocal() as database:
+            row = database.get(VideoChatInvitation, invitation["id"])
+            row.expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+            database.commit()
+    response = client.post(
+        "/api/video-chat/invitations/validate",
+        json={"token": "invalid" if state == "invalid" else token(invitation)},
+    )
+    assert response.status_code == 200
+    result = response.json()
+    assert result["valid"] is (state == "active")
+    assert result["status"] == state
+    assert result["server_now"]
+    if state == "active":
+        assert result["invitation"] == {
+            "id": invitation["id"],
+            "label": "Public check",
+            "expires_at": None,
+        }
+    else:
+        assert result["invitation"] is None
+
+
 @pytest.mark.parametrize("minutes", [0, -1, True, 525601, "60", 1.5])
 def test_invalid_invitation_durations_are_rejected(client, minutes):
     with pytest.raises(ValueError):

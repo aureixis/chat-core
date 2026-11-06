@@ -1,7 +1,9 @@
 """Live, consent-based video discovery and directed WebRTC signalling."""
 
+import asyncio
 import json
 import secrets
+from contextlib import suppress
 from typing import Literal
 from uuid import uuid4
 
@@ -10,6 +12,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, st
 from ..config import get_settings
 from ..database import SessionLocal
 from ..security import get_user_from_token
+from ..services.video_invitations import invitation_states, validate_token
 from .chat import _websocket_credentials
 
 router = APIRouter(tags=["video"])
@@ -20,6 +23,40 @@ class VideoRoom:
         self.clients: dict[str, WebSocket] = {}
         self.participants: dict[str, dict] = {}
         self.links: set[tuple[str, str]] = set()
+        self.invitations: dict[str, str] = {}
+        self.monitor: asyncio.Task | None = None
+
+    async def enforce_invitations(self):
+        while self.clients:
+            await asyncio.sleep(1)
+            states = invitation_states(set(self.invitations.values()))
+            for participant_id, invitation_id in list(self.invitations.items()):
+                invite_status = states.get(invitation_id, "invalid")
+                websocket = self.clients.get(participant_id)
+                if invite_status != "active" and websocket:
+                    # Remove presence before waiting for the transport close so
+                    # admins immediately stop media for the revoked visitor.
+                    self.clients.pop(participant_id, None)
+                    self.participants.pop(participant_id, None)
+                    self.invitations.pop(participant_id, None)
+                    self.links = {link for link in self.links if participant_id not in link}
+                    try:
+                        await websocket.send_json({"type": "invitation", "status": invite_status})
+                        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                    except (RuntimeError, WebSocketDisconnect, OSError):
+                        pass
+                    await self.roster()
+
+    def start_monitor(self):
+        if self.monitor is None or self.monitor.done():
+            self.monitor = asyncio.create_task(self.enforce_invitations())
+
+    async def stop_monitor_if_empty(self):
+        if not self.clients and self.monitor:
+            self.monitor.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.monitor
+            self.monitor = None
 
     async def roster(self):
         for participant_id, websocket in list(self.clients.items()):
@@ -53,7 +90,9 @@ async def _authorize_camera(websocket: WebSocket, target_id: str, password: obje
     )
     await websocket.send_json(
         {
-            "type": "video_access", "target": target_id, "granted": granted,
+            "type": "video_access",
+            "target": target_id,
+            "granted": granted,
             **({} if granted else {"detail": "Incorrect video password"}),
         }
     )
@@ -67,12 +106,24 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
     participant_id = uuid4().hex
     try:
         credential, subprotocol = _websocket_credentials(websocket, None)
+        invitation = None
+        if role == "visitor":
+            protocols = [
+                value.strip()
+                for value in websocket.headers.get("sec-websocket-protocol", "").split(",")
+            ]
+            invitation, invite_status = validate_token(protocols[2] if len(protocols) > 2 else None)
+            if invite_status != "active":
+                raise HTTPException(status_code=403, detail="Valid invitation required")
         # Do not retain a database connection for the lifetime of a video visit.
         with SessionLocal() as database:
             user = get_user_from_token(credential, database)
             name = user.name
         await websocket.accept(subprotocol=subprotocol)
         room.clients[participant_id] = websocket
+        if invitation:
+            room.invitations[participant_id] = invitation["id"]
+        room.start_monitor()
         room.participants[participant_id] = {
             "id": participant_id,
             "name": name,
@@ -83,6 +134,8 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
         await room.roster()
         while True:
             raw = await websocket.receive_text()
+            if participant_id not in room.participants:
+                break
             if len(raw) > 65_536:
                 await websocket.close(code=status.WS_1009_MESSAGE_TOO_BIG)
                 break
@@ -104,14 +157,17 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
                     or target_id == participant_id
                     or not isinstance(signal, dict)
                     or not isinstance(signal.get("kind"), str)
-                    or signal.get("kind") not in {"connect", "offer", "answer", "ice", "hangup", "screen", "camera"}
+                    or signal.get("kind")
+                    not in {"connect", "offer", "answer", "ice", "hangup", "screen", "camera"}
                 ):
                     continue
                 target = room.clients.get(target_id)
                 target_participant = room.participants.get(target_id)
                 if not target or not target_participant or target_participant["role"] == role:
                     continue
-                link = (participant_id, target_id) if role == "admin" else (target_id, participant_id)
+                link = (
+                    (participant_id, target_id) if role == "admin" else (target_id, participant_id)
+                )
                 kind = signal["kind"]
                 if kind == "offer":
                     if role != "admin":
@@ -166,5 +222,7 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
     finally:
         room.clients.pop(participant_id, None)
         room.participants.pop(participant_id, None)
+        room.invitations.pop(participant_id, None)
         room.links = {link for link in room.links if participant_id not in link}
+        await room.stop_monitor_if_empty()
         await room.roster()

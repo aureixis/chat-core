@@ -4,10 +4,12 @@ import asyncio
 import json
 import secrets
 from contextlib import suppress
+from datetime import datetime, timezone
 from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
+from pydantic import BaseModel, Field
 
 from ..config import get_settings
 from ..database import SessionLocal
@@ -22,6 +24,23 @@ from ..services.video_invitations import (
 from .chat import _websocket_credentials
 
 router = APIRouter(tags=["video chat"])
+
+
+class InvitationCheck(BaseModel):
+    token: str = Field(min_length=1, max_length=4096)
+
+
+@router.post("/api/video-chat/invitations/validate")
+def check_invitation(payload: InvitationCheck):
+    invitation, invite_status = validate_token(payload.token)
+    return {
+        "valid": invite_status == "active",
+        "status": invite_status,
+        "server_now": datetime.now(timezone.utc).isoformat(),
+        "invitation": {key: invitation[key] for key in ("id", "label", "expires_at")}
+        if invitation and invite_status == "active"
+        else None,
+    }
 
 
 class CallRoom:
@@ -162,10 +181,11 @@ class CallRoom:
 
     async def stop_monitor_if_empty(self):
         if not self.clients and self.monitor:
-            self.monitor.cancel()
-            with suppress(asyncio.CancelledError):
-                await self.monitor
+            monitor = self.monitor
             self.monitor = None
+            monitor.cancel()
+            with suppress(asyncio.CancelledError):
+                await monitor
 
 
 call_room = CallRoom()
@@ -353,9 +373,21 @@ async def video_chat(websocket: WebSocket, role: Literal["visitor", "admin"] = "
         except RuntimeError:
             pass
     finally:
+        peer = call_room.peer_id(participant_id)
+        person = call_room.people.get(participant_id)
+        if peer and person:
+            visitor = peer if person["role"] == "admin" else participant_id
+            call_room.approved.pop(visitor, None)
         call_room.pending.pop(participant_id, None)
-        await call_room.end_call(participant_id, "The other participant disconnected.")
         call_room.clients.pop(participant_id, None)
         call_room.people.pop(participant_id, None)
-        await call_room.stop_monitor_if_empty()
-        await call_room.broadcast_state()
+        # Clear admission/presence synchronously before notifying other sockets:
+        # transport cancellation must not leave a stale client or approved call.
+        try:
+            if peer:
+                await call_room.send(
+                    peer, {"type": "call_ended", "detail": "The other participant disconnected."}
+                )
+        finally:
+            await call_room.stop_monitor_if_empty()
+            await call_room.broadcast_state()

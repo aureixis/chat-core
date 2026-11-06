@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
@@ -6,6 +7,7 @@ from starlette.websockets import WebSocketDisconnect
 from app.database import SessionLocal
 from app.models import User
 from app.routers.video import room
+from app.services.video_invitations import create_invitation, revoke_invitation, validate_token
 
 
 def guest(client, name):
@@ -15,7 +17,34 @@ def guest(client, name):
     )
     assert response.status_code == 201
     result = response.json()
-    return result, ["lamya-bearer", result["access_token"]]
+    invitation = create_invitation("Screen visitor", None)
+    token = parse_qs(urlsplit(invitation["join_path"]).query)["invite"][0]
+    return result, ["lamya-bearer", result["access_token"], token]
+
+
+def test_screen_visitors_require_a_valid_invitation_and_revocation_disconnects_them(client):
+    _, visitor_protocols = guest(client, "Invited screen visitor")
+    _, admin_protocols = guest(client, "Screen controller")
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect("/ws/live/room", subprotocols=visitor_protocols[:2]):
+            pass
+    with client.websocket_connect("/ws/live/room", subprotocols=visitor_protocols) as visitor:
+        visitor.receive_json()
+        visitor.receive_json()
+        with client.websocket_connect(
+            "/ws/live/room?role=admin", subprotocols=admin_protocols
+        ) as admin:
+            admin.receive_json()
+            assert len(admin.receive_json()["participants"]) == 1
+            visitor.receive_json()
+            invitation, _ = validate_token(visitor_protocols[2])
+            revoke_invitation(invitation["id"])
+            assert visitor.receive_json() == {"type": "invitation", "status": "revoked"}
+            with pytest.raises(WebSocketDisconnect):
+                visitor.receive_json()
+            assert admin.receive_json()["participants"] == []
+    assert room.invitations == {}
+    assert room.monitor is None
 
 
 def test_admin_views_cameras_and_shares_screen_without_visitor_discovery(client):
@@ -49,15 +78,24 @@ def test_admin_views_cameras_and_shares_screen_without_visitor_discovery(client)
 
                 offer = {"kind": "offer", "description": {"type": "offer", "sdp": "test"}}
                 admin_ws.send_json(
-                    {"type": "signal", "target": first_id, "from": "spoofed", "signal": {**offer, "password": "1234"}}
+                    {
+                        "type": "signal",
+                        "target": first_id,
+                        "from": "spoofed",
+                        "signal": {**offer, "password": "1234"},
+                    }
                 )
                 assert admin_ws.receive_json() == {
-                    "type": "video_access", "target": first_id, "granted": True
+                    "type": "video_access",
+                    "target": first_id,
+                    "granted": True,
                 }
                 controllers = first_ws.receive_json()["participants"]
                 assert [row["id"] for row in controllers] == [admin_id]
                 assert first_ws.receive_json() == {
-                    "type": "signal", "from": admin_id, "signal": {**offer, "camera_allowed": True}
+                    "type": "signal",
+                    "from": admin_id,
+                    "signal": {**offer, "camera_allowed": True},
                 }
                 assert second_ws.receive_json()["participants"] == []
                 admin_ws.receive_json()
@@ -65,20 +103,26 @@ def test_admin_views_cameras_and_shares_screen_without_visitor_discovery(client)
                 first_ws.send_json({"type": "signal", "target": admin_id, "signal": answer})
                 assert admin_ws.receive_json()["signal"] == answer
                 admin_ws.send_json(
-                    {"type": "signal", "target": first_id, "signal": {"kind": "screen", "enabled": True}}
+                    {
+                        "type": "signal",
+                        "target": first_id,
+                        "signal": {"kind": "screen", "enabled": True},
+                    }
                 )
                 assert first_ws.receive_json()["signal"] == {"kind": "screen", "enabled": True}
 
                 # Visitors cannot initiate offers, discover peers, or send screens.
                 first_ws.send_text("invalid json")
                 first_ws.send_json(["invalid payload"])
-                first_ws.send_json(
-                    {"type": "signal", "target": admin_id, "signal": {"kind": {}}}
-                )
+                first_ws.send_json({"type": "signal", "target": admin_id, "signal": {"kind": {}}})
                 first_ws.send_json({"type": "signal", "target": second_id, "signal": offer})
                 first_ws.send_json({"type": "signal", "target": admin_id, "signal": offer})
                 first_ws.send_json(
-                    {"type": "signal", "target": admin_id, "signal": {"kind": "screen", "enabled": True}}
+                    {
+                        "type": "signal",
+                        "target": admin_id,
+                        "signal": {"kind": "screen", "enabled": True},
+                    }
                 )
                 first_ws.send_json({"type": "presence", "camera": False})
                 # The next message must be the roster, not any prohibited signal.
@@ -161,12 +205,18 @@ def test_video_password_configuration_and_retry(client, monkeypatch):
             offer = {"kind": "offer", "description": {"type": "offer", "sdp": "configured"}}
             for password, allowed in [("1234", False), ("custom-video-password", True)]:
                 admin.send_json(
-                    {"type": "signal", "target": visitor_id, "signal": {**offer, "password": password}}
+                    {
+                        "type": "signal",
+                        "target": visitor_id,
+                        "signal": {**offer, "password": password},
+                    }
                 )
                 assert admin.receive_json()["granted"] is allowed
             visitor.receive_json()
             assert visitor.receive_json() == {
-                "type": "signal", "from": admin_id, "signal": {**offer, "camera_allowed": True}
+                "type": "signal",
+                "from": admin_id,
+                "signal": {**offer, "camera_allowed": True},
             }
             assert room.links == {(admin_id, visitor_id)}
 
@@ -184,7 +234,9 @@ def test_screen_sharing_connects_without_password_and_camera_unlock_is_separate(
             admin.receive_json()
             visitor.receive_json()
             offer = {
-                "kind": "offer", "purpose": "screen", "camera_allowed": True,
+                "kind": "offer",
+                "purpose": "screen",
+                "camera_allowed": True,
                 "description": {"type": "offer", "sdp": "screen-only"},
             }
             admin.send_json({"type": "signal", "target": visitor_id, "signal": offer})
@@ -195,27 +247,39 @@ def test_screen_sharing_connects_without_password_and_camera_unlock_is_separate(
             assert room.links == {(admin_id, visitor_id)}
             for password in (None, "wrong"):
                 admin.send_json(
-                    {"type": "signal", "target": visitor_id,
-                     "signal": {"kind": "camera", "password": password, "enabled": True}}
+                    {
+                        "type": "signal",
+                        "target": visitor_id,
+                        "signal": {"kind": "camera", "password": password, "enabled": True},
+                    }
                 )
                 assert admin.receive_json()["granted"] is False
                 # Failed camera unlocks preserve the screen link and send no camera grant.
                 admin.send_json(
-                    {"type": "signal", "target": visitor_id,
-                     "signal": {"kind": "screen", "enabled": True}}
+                    {
+                        "type": "signal",
+                        "target": visitor_id,
+                        "signal": {"kind": "screen", "enabled": True},
+                    }
                 )
                 assert visitor.receive_json()["signal"] == {"kind": "screen", "enabled": True}
                 assert room.links == {(admin_id, visitor_id)}
             admin.send_json(
-                {"type": "signal", "target": visitor_id,
-                 "signal": {"kind": "camera", "password": "1234"}}
+                {
+                    "type": "signal",
+                    "target": visitor_id,
+                    "signal": {"kind": "camera", "password": "1234"},
+                }
             )
             assert admin.receive_json()["granted"] is True
             assert visitor.receive_json()["signal"] == {"kind": "camera", "enabled": True}
             # Visitors cannot grant themselves camera access or initiate a screen offer.
             visitor.send_json(
-                {"type": "signal", "target": admin_id,
-                 "signal": {"kind": "camera", "password": "1234", "enabled": True}}
+                {
+                    "type": "signal",
+                    "target": admin_id,
+                    "signal": {"kind": "camera", "password": "1234", "enabled": True},
+                }
             )
             visitor.send_json({"type": "signal", "target": admin_id, "signal": offer})
             visitor.send_json({"type": "presence", "camera": True})
@@ -234,6 +298,9 @@ def test_expired_guest_can_be_replaced_without_login(client):
         with client.websocket_connect("/ws/live/room", subprotocols=protocols):
             pass
     fresh, _ = guest(client, "Fresh visitor")
-    assert client.get(
-        "/api/auth/me", headers={"Authorization": f"Bearer {fresh['access_token']}"}
-    ).status_code == 200
+    assert (
+        client.get(
+            "/api/auth/me", headers={"Authorization": f"Bearer {fresh['access_token']}"}
+        ).status_code
+        == 200
+    )
