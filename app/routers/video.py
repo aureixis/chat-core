@@ -128,6 +128,7 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
             "id": participant_id,
             "name": name,
             "camera": False,
+            "microphone": False,
             "role": role,
         }
         await websocket.send_json({"type": "welcome", "id": participant_id})
@@ -146,8 +147,12 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
             if not isinstance(payload, dict):
                 continue
             if payload.get("type") == "presence" and role == "visitor":
-                if isinstance(payload.get("camera"), bool):
-                    room.participants[participant_id]["camera"] = payload["camera"]
+                updated = False
+                for field in ("camera", "microphone"):
+                    if isinstance(payload.get(field), bool):
+                        room.participants[participant_id][field] = payload[field]
+                        updated = True
+                if updated:
                     await room.roster()
             elif payload.get("type") == "signal":
                 target_id = payload.get("target")
@@ -158,7 +163,16 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
                     or not isinstance(signal, dict)
                     or not isinstance(signal.get("kind"), str)
                     or signal.get("kind")
-                    not in {"connect", "offer", "answer", "ice", "hangup", "screen", "camera"}
+                    not in {
+                        "connect",
+                        "offer",
+                        "answer",
+                        "ice",
+                        "hangup",
+                        "screen",
+                        "camera",
+                        "microphone",
+                    }
                 ):
                     continue
                 target = room.clients.get(target_id)
@@ -173,12 +187,14 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
                     if role != "admin":
                         continue
                     camera_allowed = False
+                    microphone_allowed = False
                     if signal.get("purpose") != "screen":
-                        camera_allowed = await _authorize_camera(
+                        microphone_allowed = await _authorize_camera(
                             websocket, target_id, signal.get("password")
                         )
-                        if not camera_allowed:
+                        if not microphone_allowed:
                             continue
+                        camera_allowed = signal.get("purpose") != "audio"
                     room.links.add(link)
                     await room.roster()
                 elif link not in room.links:
@@ -187,18 +203,26 @@ async def video_room(websocket: WebSocket, role: Literal["visitor", "admin"] = "
                     continue
                 if kind == "screen" and role != "admin":
                     continue
-                if kind == "camera":
-                    if role != "admin" or not await _authorize_camera(
-                        websocket, target_id, signal.get("password")
-                    ):
+                if kind in {"camera", "microphone"}:
+                    if role != "admin":
+                        continue
+                    if not (
+                        kind == "microphone" and signal.get("enabled") is False
+                    ) and not await _authorize_camera(websocket, target_id, signal.get("password")):
                         continue
                 forwarded = {key: value for key, value in signal.items() if key != "password"}
                 if kind == "offer":
-                    # Never trust a client-supplied camera permission. A screen-only
-                    # connection must not transmit the visitor's camera track.
+                    # Never trust client-supplied media permissions. Screen-only
+                    # connections must not transmit visitor camera or microphone tracks.
                     forwarded["camera_allowed"] = camera_allowed
+                    forwarded["microphone_allowed"] = microphone_allowed
                 elif kind == "camera":
                     forwarded = {"kind": "camera", "enabled": True}
+                elif kind == "microphone":
+                    forwarded = {
+                        "kind": "microphone",
+                        "enabled": signal.get("enabled") is not False,
+                    }
                 if target:
                     try:
                         # The sender is supplied by the server, never trusted from the client.
