@@ -27,7 +27,7 @@ from .models import (
     User,
 )
 from .request_context import reset_request_context, set_request_context
-from .routers import admin, auth, chat, connections, privacy, robots, social, users
+from .routers import admin, auth, chat, connections, privacy, robots, social, users, video
 from .security import hash_password
 from .tenancy import apply_worker_context
 from .worker import agent_worker_loop
@@ -256,6 +256,7 @@ app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(connections.router)
 app.include_router(chat.router)
+app.include_router(video.router)
 app.include_router(social.router)
 app.include_router(robots.router)
 app.include_router(privacy.router)

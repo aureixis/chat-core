@@ -2,6 +2,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine, event
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -15,7 +16,11 @@ class Base(DeclarativeBase):
 database_url = get_settings().sqlalchemy_database_url
 engine_options: dict = {"pool_pre_ping": True}
 if database_url.startswith("sqlite"):
-    engine_options.update(connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    engine_options.update(connect_args={"check_same_thread": False})
+    # Only an in-memory database needs a shared connection. File databases must
+    # give simultaneous visitor requests separate transactional connections.
+    if make_url(database_url).database in {None, "", ":memory:"}:
+        engine_options["poolclass"] = StaticPool
 engine = create_engine(database_url, **engine_options)
 if database_url.startswith("sqlite"):
 

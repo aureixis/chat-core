@@ -56,6 +56,10 @@ def get_user_from_token(token: str, database: Session) -> User:
     user = database.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if user.is_guest and user.guest_expires_at:
+        expires = user.guest_expires_at.replace(tzinfo=timezone.utc)
+        if expires <= datetime.now(timezone.utc):
+            raise HTTPException(status_code=401, detail="Guest session expired")
     if user.account_status != "active":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is not active")
     # Establish identity first so the membership table's RLS policy can reveal
